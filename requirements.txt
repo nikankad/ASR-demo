@@ -1,0 +1,7 @@
+gradio
+torch
+torchaudio
+transformers
+librosa
+numpy
+pyctcdecode
