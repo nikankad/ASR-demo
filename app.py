@@ -240,8 +240,8 @@ def transcribe_audio(audio_input):
                 logger.warning("LM decode failed, using raw output")
                 lm_text = raw_text
         else:
-            logger.warning("LM unavailable or logits unavailable; showing raw output in LM field")
-            lm_text = raw_text
+            logger.warning("LM unavailable or logits unavailable")
+            lm_text = "Model not loaded"
 
         logger.info(f"Final Output - Raw: '{raw_text}' | LM: '{lm_text}'")
         logger.info("-" * 60)
@@ -298,7 +298,8 @@ with gr.Blocks(theme=gr.themes.Default(primary_hue="slate", text_size="sm"), tit
     gr.Markdown(f"# {UI_TITLE}")
     gr.Markdown(f"*{UI_DESCRIPTION}*")
 
-    lm_status = "✅ KenLM Loaded" if lm_model.has_external_lm else "⚠️ Beam Decoder Only"
+    lm_loaded = lm_model.model is not None
+    lm_status = "Loaded" if lm_loaded else "Model not loaded"
 
     with gr.Row():
         audio_input = gr.Audio(
@@ -306,8 +307,6 @@ with gr.Blocks(theme=gr.themes.Default(primary_hue="slate", text_size="sm"), tit
             type="numpy",
             sources=["upload", "microphone"]
         )
-
-    gr.Markdown(f"**Decoder status:** {lm_status}")
 
     with gr.Row():
         transcribe_btn = gr.Button("Transcribe", variant="primary", elem_classes=["transcribe-btn"])
@@ -319,17 +318,18 @@ with gr.Blocks(theme=gr.themes.Default(primary_hue="slate", text_size="sm"), tit
             lines=3
         )
         lm_text_output = gr.Textbox(
-            label="With Language Model",
+            label=f"With Language Model ({lm_status})",
             interactive=False,
-            lines=3
+            lines=3,
+            value="" if lm_loaded else "Model not loaded"
         )
 
     with gr.Row():
-        with gr.Accordion("Model Panel", open=False):
-            with gr.Tabs():
-                with gr.Tab("Model Information"):
+        with gr.Accordion("Model Panel", open=True):
+            with gr.Tabs(selected="resource-usage"):
+                with gr.Tab("Model Information", id="model-info"):
                     model_info_output = gr.Markdown(get_model_info())
-                with gr.Tab("Resource Usage"):
+                with gr.Tab("Resource Usage", id="resource-usage"):
                     resource_usage_output = gr.Markdown()
                     cpu_chart = gr.LinePlot(
                         x="time",

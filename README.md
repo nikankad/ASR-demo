@@ -1,29 +1,28 @@
 # ASR Live Demo
 
-A Gradio-based web interface for automatic speech recognition with real-time transcription and beam search decoding. Originally built for the IBNet acoustic model, this demo is designed to work with any PyTorch-based ASR model.
+A Gradio-based web interface for automatic speech recognition with real-time transcription. This project is built to be reusable: bring your own model weights, vocabulary, and optional language model.
 
 ## Features
 
-- Real-time transcription: Upload audio files or record directly from microphone
-- Beam search decoding: Improved accuracy over greedy decoding via `pyctcdecode`
-- Minimal dark UI: Clean, focused interface for model demonstration
-- Confidence scores: Display model confidence for transcriptions
-- Flexible model support: Works with any PyTorch-based ASR model
-- Audio preprocessing: Automatic resampling and normalization
-- Interactive controls: Toggle beam search and adjust decoding parameters
+- Upload audio files or record from microphone
+- Dual decoding output: raw greedy CTC and optional beam/LM decoding
+- Bring-your-own model backend support (`ibnet` or custom Python class)
+- Config-driven setup with `.env` values
+- Model information panel (backend, vocab size, parameters, LM status)
+- Live resource charts (CPU, RAM, GPU memory)
 
-## Setup
+## Requirements
 
-### Requirements
+- Python 3.11
+- PyTorch + TorchAudio
+- Gradio
+- numpy
+- librosa
+- pyctcdecode
+- pypi-kenlm (optional, only needed for external KenLM scoring)
+- psutil, pandas (resource panel)
 
-- Python 3.11 or higher
-- PyTorch and TorchAudio
-- Gradio for web interface
-- pyctcdecode for beam search decoding
-- librosa for audio processing
-- numpy for numerical operations
-
-### Installation
+## Installation
 
 ```bash
 python3.11 -m venv .venv
@@ -31,135 +30,109 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### Running the App
+## Quick Start
+
+1. Copy `.env.example` to `.env`.
+2. Fill in model-specific values.
+3. Run:
 
 ```bash
 python app.py
 ```
 
-The app launches at `http://localhost:7860`
+App default URL: `http://localhost:7860`
 
-## Usage
+## Configuration
 
-1. Upload or record audio using the audio input component
-2. Toggle "Use Language Model" to enable beam search decoding for improved transcription
-3. Click the Transcribe button to process the audio
-4. View results including transcription text and confidence score
+All settings are environment-driven via `.env`:
 
-## Architecture
+- `MODEL_BACKEND`: `ibnet` or `python_class`
+- `MODEL_WEIGHTS_PATH`: path to your acoustic model weights/checkpoint
+- `VOCAB`: character/token vocabulary used for CTC decoding
+- `MODEL_CLASS`: required when `MODEL_BACKEND=python_class`, format `package.module:ClassName`
+- `LM_MODEL_NAME`, `LM_MODEL_PATH`: optional LM name/path for decoder
+- `LM_ALPHA`, `LM_BETA`, `LM_UNK_SCORE_OFFSET`, `BEAM_WIDTH`: beam/LM controls
+- `SAMPLE_RATE`, `AUDIO_MAX_DURATION`: audio settings
+- `UI_TITLE`, `UI_DESCRIPTION`, `THEME`: UI settings
 
-- `app.py`: Main Gradio interface and inference pipeline
-- `models/asr_model.py`: Acoustic model loading and CTC decoding
-- `models/language_model.py`: Beam search decoder via pyctcdecode
-- `config/settings.py`: Configuration for model paths, sample rates, and UI settings
-- `utils/audio.py`: Audio preprocessing utilities (resampling, normalization, mel-spectrograms)
+Note: `.env.example` is a template. Put real local paths only in your `.env`.
 
-## Model Setup
+## Model Integration Options
 
-Place your model weights in `models/model_weights/`:
+### 1) Built-in IBNet backend
 
-- `best.pt`: Acoustic model checkpoint (PyTorch format)
-- `3-gram.pruned.3e-7.arpa`: 3-gram language model file (optional, for future use)
-
-Update `config/settings.py` (or env vars) to point to your model paths and adjust sample rates to match your model.
-
-### Open-source BYO model mode
-
-You can plug in your own model without editing core app code.
-
-1. Implement a backend class with:
-   - `__init__(self, model_path, device="cpu", vocab=None)`
-   - `transcribe(self, audio_waveform)` returning a dict with at least `{"text": ...}`
-2. Use `models/custom_backend_example.py` as a template.
-3. Set env vars before running:
+Set:
 
 ```bash
-export MODEL_BACKEND=python_class
-export MODEL_CLASS=models.custom_backend_example:CustomASRBackend
-export MODEL_WEIGHTS_PATH=/absolute/or/relative/path/to/your/model.pt
-export VOCAB="abcdefghijklmnopqrstuvwxyz '"
-python app.py
+MODEL_BACKEND=ibnet
+MODEL_WEIGHTS_PATH=path/to/your/model_checkpoint.pt
+VOCAB=your_vocab_string
 ```
 
-If your backend also returns `logits` in CTC shape, the app can still run beam search decoding.
+### 2) Custom Python backend
 
-## Customization
+Use when your model architecture differs from IBNet.
 
-### Changing the Model
+Set:
 
-Edit `config/settings.py` to point to your model:
+```bash
+MODEL_BACKEND=python_class
+MODEL_CLASS=models.custom_backend_example:CustomASRBackend
+MODEL_WEIGHTS_PATH=path/to/your/model_checkpoint.pt
+VOCAB=your_vocab_string
+```
+
+Implement a class with:
+
+- `__init__(self, model_path, device="cpu", vocab=None)`
+- `transcribe(self, audio_waveform)`
+
+Return a dict with at least:
 
 ```python
-MODEL_WEIGHTS_PATH = "path/to/your/model.pt"
-LM_MODEL_PATH = "path/to/your/lm.arpa"  # optional
+{"text": "..."}
 ```
 
-The demo automatically detects model architecture and loads the appropriate weights.
+Optional return keys:
 
-### Adjusting Audio Settings
+- `confidence`: float in `[0, 1]`
+- `logits`: if provided in CTC-compatible shape, LM/beam decoding can run on it
 
-```python
-SAMPLE_RATE = 16000  # Change to match your model's expected rate
-AUDIO_MAX_DURATION = 30  # Max recording length in seconds
-```
+Starter template: `models/custom_backend_example.py`
 
-### UI Customization
+## Optional Language Model (LM)
 
-Modify the Gradio theme and layout in `app.py`:
+You can run without an LM. If configured, LM decoding is shown in the "With Language Model" panel.
 
-```python
-with gr.Blocks(theme=gr.themes.Default(...)) as demo:
-    gr.Markdown(f"# {UI_TITLE}")
-    # Add/modify UI components here
-```
+- `LM_MODEL_PATH` can point to your LM artifact (for example `.arpa` or `.bin` as supported by your setup)
+- If LM is unavailable, the app falls back to raw output in the LM panel
 
-### Beam Search Parameters
+No specific LM filename is required by this repo.
 
-Adjust beam search settings in `config/settings.py`:
+## UI Notes
 
-```python
-BEAM_WIDTH = 100  # Number of beams to maintain
-ALPHA = 0.5       # Language model weight (if using LM)
-BETA = 1.5        # Word insertion bonus
-```
+- Transcription outputs are shown side by side:
+  - Raw (Greedy CTC)
+  - With Language Model
+- "Model Panel" includes:
+  - Model Information tab
+  - Resource Usage tab with live charts
+
+## Project Structure
+
+- `app.py`: Gradio app and inference flow
+- `config/settings.py`: env-based configuration
+- `models/asr_model.py`: ASR wrapper and backend switching
+- `models/language_model.py`: beam/LM decoder
+- `models/custom_backend_example.py`: custom backend template
+- `utils/audio.py`: audio preprocessing utilities
 
 ## Development
 
-Edit `app.py` and the app will hot-reload on changes:
+Run locally:
 
 ```bash
-python app.py --debug
+python app.py
 ```
 
-Logs show inference details, model loading status, and timing information for debugging.
-
-## Technical Details
-
-### Model Support
-
-Currently tested with CTC-based acoustic models (like IBNet). The pipeline expects:
-- Model output shape: (batch, n_classes, time)
-- CTC blank index at position len(vocab)
-- PyTorch `.pt` checkpoint format
-
-### Audio Processing
-
-1. Loads audio at any sample rate
-2. Converts to mono if stereo
-3. Resamples to configured sample rate (default 16kHz)
-4. Normalizes amplitude
-5. Computes mel-spectrogram features
-
-### Decoding
-
-- Greedy decoding: Takes highest-probability character at each timestep
-- Beam search: Explores multiple hypotheses to find better transcriptions
-- No language model needed for beam search to work
-
-## Notes
-
-- Audio is automatically resampled to match the configured sample rate
-- Beam search decoding works standalone without language model compilation
-- The `.arpa` language model file requires `pypi-kenlm` to integrate (optional, has build issues on ARM Macs)
-- Confidence scores are normalized to [0, 1] range
-- The app supports both file upload and live microphone recording
+If you change config values, restart the app to reload settings.
