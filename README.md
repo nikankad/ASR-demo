@@ -61,7 +61,27 @@ Place your model weights in `models/model_weights/`:
 - `best.pt`: Acoustic model checkpoint (PyTorch format)
 - `3-gram.pruned.3e-7.arpa`: 3-gram language model file (optional, for future use)
 
-Update `config/settings.py` to point to your model paths and adjust sample rates to match your model.
+Update `config/settings.py` (or env vars) to point to your model paths and adjust sample rates to match your model.
+
+### Open-source BYO model mode
+
+You can plug in your own model without editing core app code.
+
+1. Implement a backend class with:
+   - `__init__(self, model_path, device="cpu", vocab=None)`
+   - `transcribe(self, audio_waveform)` returning a dict with at least `{"text": ...}`
+2. Use `models/custom_backend_example.py` as a template.
+3. Set env vars before running:
+
+```bash
+export MODEL_BACKEND=python_class
+export MODEL_CLASS=models.custom_backend_example:CustomASRBackend
+export MODEL_WEIGHTS_PATH=/absolute/or/relative/path/to/your/model.pt
+export VOCAB="abcdefghijklmnopqrstuvwxyz '"
+python app.py
+```
+
+If your backend also returns `logits` in CTC shape, the app can still run beam search decoding.
 
 ## Customization
 

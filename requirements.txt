@@ -5,3 +5,6 @@ transformers
 librosa
 numpy
 pyctcdecode
+pypi-kenlm
+psutil
+pandas

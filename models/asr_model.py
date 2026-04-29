@@ -2,18 +2,16 @@
 
 import torch
 import torch.nn as nn
-import numpy as np
 from pathlib import Path
 import logging
+from importlib import import_module
+
+from config.settings import MODEL_BACKEND, MODEL_CLASS, VOCAB
 
 logger = logging.getLogger(__name__)
 
 
-# Character set from IBNet training (exactly 28 chars)
-CHARS = "abcdefghijklmnopqrstuvwxyz '"
-BLANK_IDX = len(CHARS)  # 28
-IDX2CHAR = {i: c for i, c in enumerate(CHARS)}
-IDX2CHAR[BLANK_IDX] = ""
+DEFAULT_CHARS = VOCAB
 
 
 class IBConv(nn.Module):
@@ -110,11 +108,36 @@ class ASRModel:
         self.device = device
         self.model_path = Path(model_path)
         self.model = None
+        self.chars = DEFAULT_CHARS
+        self.blank_idx = len(self.chars)
+        self.idx2char = {i: c for i, c in enumerate(self.chars)}
+        self.idx2char[self.blank_idx] = ""
+        self.backend = MODEL_BACKEND.lower()
+        self.custom_model = None
+        self.spec_transform = None
         self._load_model()
 
+    @property
+    def vocab(self):
+        return list(self.chars) + [""]
+
+    def _set_vocab(self, vocab):
+        if isinstance(vocab, list):
+            vocab = "".join(vocab)
+        if isinstance(vocab, str) and vocab.strip():
+            self.chars = vocab
+            self.blank_idx = len(self.chars)
+            self.idx2char = {i: c for i, c in enumerate(self.chars)}
+            self.idx2char[self.blank_idx] = ""
+
     def _load_model(self):
-        """Load IBNet model weights from disk."""
+        """Load backend model weights from disk."""
         logger.debug(f"Loading ASR model from: {self.model_path}")
+
+        if self.backend == "python_class":
+            self._load_custom_python_model()
+            return
+
         if not self.model_path.exists():
             logger.error(f"Model weights not found at {self.model_path}")
             return
@@ -124,6 +147,15 @@ class ASRModel:
             checkpoint = torch.load(self.model_path, map_location=self.device, weights_only=False)
             config = checkpoint.get("config", {})
             logger.debug(f"Checkpoint config: {config}")
+
+            if self.backend != "ibnet":
+                logger.warning(
+                    "Unsupported MODEL_BACKEND '%s'. Supported: ibnet, python_class. Falling back to 'ibnet'.",
+                    self.backend,
+                )
+                self.backend = "ibnet"
+
+            self._set_vocab(config.get("vocab", self.chars))
 
             state_dict = checkpoint.get("model_state_dict", checkpoint)
             logger.debug(f"State dict keys: {len(state_dict)} parameters")
@@ -136,7 +168,7 @@ class ASRModel:
             logger.debug(f"Initializing IBNet with config: n_mels={config.get('n_mels', 64)}, n_classes={config.get('n_classes', 29)}")
             self.model = IBNet(
                 n_mels=config.get("n_mels", 64),
-                n_classes=config.get("n_classes", 29),
+                n_classes=config.get("n_classes", len(self.chars) + 1),
                 R=config.get("R", 3),
                 expand=2,
                 C=192,
@@ -144,9 +176,41 @@ class ASRModel:
 
             self.model.load_state_dict(state_dict, strict=False)
             self.model.eval()
+
+            from utils.audio import spec_transform
+            self.spec_transform = spec_transform.to(self.device)
             logger.info(f"✓ IBNet model loaded successfully from {self.model_path}")
         except Exception as e:
             logger.error(f"Failed to load model: {e}", exc_info=True)
+            self.model = None
+
+    def _load_custom_python_model(self):
+        """Load user-provided model class from MODEL_CLASS path.
+
+        Expected format: "package.module:ClassName"
+        The class must provide: transcribe(audio_waveform) -> dict
+        """
+        if not MODEL_CLASS:
+            logger.error("MODEL_BACKEND=python_class requires MODEL_CLASS to be set")
+            self.model = None
+            return
+
+        try:
+            module_name, class_name = MODEL_CLASS.split(":", maxsplit=1)
+            module = import_module(module_name)
+            model_cls = getattr(module, class_name)
+            self.custom_model = model_cls(model_path=str(self.model_path), device=self.device, vocab=self.chars)
+
+            if hasattr(self.custom_model, "vocab"):
+                custom_vocab = getattr(self.custom_model, "vocab")
+                if isinstance(custom_vocab, list):
+                    custom_vocab = "".join(custom_vocab)
+                self._set_vocab(custom_vocab)
+
+            self.model = self.custom_model
+            logger.info("✓ Custom model backend loaded from %s", MODEL_CLASS)
+        except Exception as e:
+            logger.error("Failed to load custom model backend '%s': %s", MODEL_CLASS, e, exc_info=True)
             self.model = None
 
     def _ctc_greedy_decode(self, token_ids):
@@ -155,8 +219,8 @@ class ASRModel:
         prev = None
         for token_id in token_ids:
             token = int(token_id)
-            if token != BLANK_IDX and token != prev:
-                decoded.append(IDX2CHAR.get(token, ""))
+            if token != self.blank_idx and token != prev:
+                decoded.append(self.idx2char.get(token, ""))
             prev = token
         return "".join(decoded)
 
@@ -173,29 +237,37 @@ class ASRModel:
             logger.error("Model not loaded")
             return {"text": "Model not loaded", "confidence": 0.0}
 
-        try:
-            from config.settings import SAMPLE_RATE
-            from utils.audio import spec_transform
+        if self.backend == "python_class":
+            try:
+                result = self.custom_model.transcribe(audio_waveform)
+                if isinstance(result, dict):
+                    return result
+                return {"text": str(result), "confidence": 0.0}
+            except Exception as e:
+                logger.error("Custom backend inference error: %s", e, exc_info=True)
+                return {"text": f"Inference error: {str(e)}", "confidence": 0.0}
 
+        try:
             logger.debug(f"Transcribe input - Shape: {audio_waveform.shape}, Dtype: {audio_waveform.dtype}")
 
             # Convert to tensor and add batch/channel dims
-            audio_tensor = torch.from_numpy(audio_waveform).float()
+            audio_tensor = torch.from_numpy(audio_waveform).float().to(self.device)
             audio_tensor = audio_tensor.unsqueeze(0).unsqueeze(0)  # (1, 1, time)
             logger.debug(f"Audio tensor shape after unsqueeze: {audio_tensor.shape}")
 
-            # Compute spectrogram features
+            # Compute spectrogram features (spec_transform is on device)
             logger.debug("Computing mel-spectrogram...")
-            features = spec_transform(audio_tensor).squeeze(0)  # (n_mels, time)
+            features = self.spec_transform(audio_tensor).squeeze(0)  # (n_mels, time)
             logger.debug(f"Spectrogram shape: {features.shape}, Range: [{features.min():.2f}, {features.max():.2f}]")
 
-            inputs = features.unsqueeze(0).to(self.device)  # (1, n_mels, time)
+            inputs = features.unsqueeze(0)  # already on device
             logger.debug(f"Model input shape: {inputs.shape}")
 
             # Run inference
             logger.debug("Running IBNet inference...")
             with torch.no_grad():
                 logits = self.model(inputs)
+                log_probs = logits.squeeze(0).log_softmax(dim=0)
 
             logger.debug(f"Logits shape: {logits.shape}, Range: [{logits.min():.4f}, {logits.max():.4f}]")
 
@@ -224,8 +296,7 @@ class ASRModel:
             text = self._ctc_greedy_decode(token_ids)
             logger.debug(f"Decoded text: '{text}'")
 
-            # Compute confidence from log-probs
-            log_probs = logits.squeeze(0).log_softmax(dim=0)
+            # Compute confidence from log-probs (computed above inside no_grad)
             confidence = float(log_probs.max().item())
             confidence = max(0.0, min(1.0, (confidence + 10) / 10))  # Normalize to [0, 1]
 
